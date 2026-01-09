@@ -3,7 +3,6 @@ Author: Zach Morgan
 Description: Creates a database of games and their tags
 """
 
-import steamapi
 import requests
 from bs4 import BeautifulSoup
 import time
