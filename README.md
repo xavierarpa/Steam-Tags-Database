@@ -19,7 +19,7 @@ Base de datos de juegos de Steam con sus etiquetas (tags). Este proyecto extrae 
 2. **Instala las dependencias:**
 
    ```bash
-   pip install requests beautifulsoup4 steamapi
+   pip install requests beautifulsoup4
    ```
 
 ## Uso Local
