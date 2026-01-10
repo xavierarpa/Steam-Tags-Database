@@ -18,11 +18,20 @@ def find_total_pages(filter):
     Returns: Integer page count
     """
     
-    first_page = requests.get("http://store.steampowered.com/search/?" + filter)
+    first_page = requests.get("https://store.steampowered.com/search/?" + filter, timeout=30)
     html = BeautifulSoup(first_page.content, "html.parser")
-    div = html.find("div", class_ = "search_pagination_left")
+    div = html.find("div", class_="search_pagination_left")
+    if div is None:
+        print("Warning: Could not find pagination element, defaulting to 1 page")
+        return 1
     split = div.contents[0].split()
-    total_pages = math.ceil(int(split[5]) / 25)
+    # Expected format: "showing X - Y of Z"
+    if len(split) >= 6:
+        total_pages = math.ceil(int(split[5]) / 25)
+    else:
+        print(f"Warning: Unexpected pagination format: {split}, defaulting to 1 page")
+        return 1
+    print(f"Found {total_pages} pages to process")
     return total_pages
 
 
@@ -35,14 +44,19 @@ def get_tags(page):
     """
 
     html = BeautifulSoup(page.content, "html.parser")
-    title_raw = html.find("title").contents
+    title_element = html.find("title")
+    if title_element is None or len(title_element.contents) == 0:
+        return "", ""
+    
+    title_raw = title_element.contents
     trim = title_raw[0].split()
     on_steam = False
     save = False
     title = ""
-    if " ".join(trim[-2:]) == "on Steam":
+    
+    if len(trim) >= 2 and " ".join(trim[-2:]) == "on Steam":
         on_steam = True
-    if "%" in trim[1]:
+    if len(trim) > 1 and "%" in trim[1]:
         save = True
     if on_steam and not save:
         title = " ".join(trim[0:-2])
@@ -51,20 +65,14 @@ def get_tags(page):
     if save and on_steam:
         title = " ".join(trim[3:-2])
     if not save and not on_steam:
-        title = title_raw        
+        title = str(title_raw[0]) if title_raw else ""        
     tags_raw = html.find_all("a", class_="app_tag")
     tags_list = []
-    for tags in tags_raw:
-        tag = tags.contents[0].strip()
-        #If i want tags to be "-" seperated
-        """
-        try:
-            tag_split = tag.split()
-            tag = "-".join(tag_split[:])
-        except:
-            pass  
-        """
-        tags_list.append(tag)
+    for tag_element in tags_raw:
+        if tag_element.contents and len(tag_element.contents) > 0:
+            tag = tag_element.contents[0].strip()
+            if tag:
+                tags_list.append(tag)
     formatted_tags = ",".join(tags_list[:])
     return title, formatted_tags               
     
@@ -124,45 +132,56 @@ def maintain_database(conn, total_pages, tablename, filter):
     except:
         maintain = False
     #Pages in the steam store start at 1, not 0
+    total_games_added = 0
     for page_number in range(1, total_pages + 1):
         page_count += 1
         try:
-            if page_number == 1:
-                page = requests.get("http://store.steampowered.com/search/" + filter)
-            else:
-                page = requests.get("http://store.steampowered.com/search/?" + filter  + "&page=" + str(page_number))
+            # Build the search URL with proper query string
+            url = "https://store.steampowered.com/search/?" + filter + "&page=" + str(page_number)
+            page = requests.get(url, timeout=30)
             html = BeautifulSoup(page.content, "html.parser")
-            raw_links_lst = html.find_all("div", class_ = "col search_capsule")
-            links_lst =[]
+            # Find all search result rows (anchor elements with search_result_row class)
+            search_results = html.find_all("a", class_="search_result_row")
+            links_lst = []
             #creates a list of the Store URLs on the current search page
-            for index in range(0, len(raw_links_lst)):
-                links_lst.append(raw_links_lst[index].parent["href"]) 
+            for result in search_results:
+                href = result.get("href")
+                if href:
+                    links_lst.append(href)
             #Cookies that by pass the age gate for age restricted games
             agecheck = {'birthtime': '568022401'}
             for link in links_lst:
-                id_lst = link.split("/")
-                id = id_lst[4]
-                #check if game is new and not in database yet
-                c.execute("SELECT title FROM " + tablename + " WHERE id=" + str(id))
-                data = c.fetchone()
-                if data is None:
-                    page = requests.get(link, cookies = agecheck)
-                    title, tags = get_tags(page)
-                    c.execute("INSERT INTO " + tablename + " VALUES(?, ?, ?)", (id, title, tags))
-                games_on_steam[id] = None    
-            conn.commit()        
-        except:
-            print(page_count)
-    #Supposed to delete old games no longer on steam, randomly deletes games that are on steam can't figure out why, the website still 
-    #functions 100% with old games staying in the database, maybe I'll get around to fixing it
-            """
-    if maintain:
-        game_lst = create_database_list(c, tablename)      
-        #delete old games no longer on steam
-        for game in game_lst:
-            if game not in games_on_steam:
-                c.execute("DELETE FROM " + tablename + " WHERE id=?", [game])
-        """
+                try:
+                    id_lst = link.split("/")
+                    # App ID is typically at index 4: https://store.steampowered.com/app/APPID/...
+                    if len(id_lst) > 4:
+                        id = id_lst[4]
+                    else:
+                        continue
+                    #check if game is new and not in database yet
+                    c.execute("SELECT title FROM " + tablename + " WHERE id=?", (str(id),))
+                    data = c.fetchone()
+                    if data is None:
+                        game_page = requests.get(link, cookies=agecheck, timeout=30)
+                        title, tags = get_tags(game_page)
+                        c.execute("INSERT INTO " + tablename + " VALUES(?, ?, ?)", (id, title, tags))
+                        total_games_added += 1
+                    games_on_steam[id] = None
+                except Exception as e:
+                    print(f"Error processing game link {link}: {e}")
+            conn.commit()
+            # Print progress every 10 pages
+            if page_count % 10 == 0:
+                print(f"Processed {page_count}/{total_pages} pages, added {total_games_added} games so far")
+        except Exception as e:
+            print(f"Error processing page {page_count}: {e}")
+    print(f"Finished processing {page_count} pages, total games added: {total_games_added}")
+    # Note: Maintenance code to delete old games commented out as it was causing issues
+    # if maintain:
+    #     game_lst = create_database_list(c, tablename)      
+    #     for game in game_lst:
+    #         if game not in games_on_steam:
+    #             c.execute("DELETE FROM " + tablename + " WHERE id=?", [game])
 
 def main():
     conn = sqlite3.connect("tags_database.db")
