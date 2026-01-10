@@ -33,8 +33,13 @@ jobs:
       - name: Export to CSV
         run: python export_to_csv.py
 
-      - name: Create ZIP file
-        run: zip games_export.zip games_export.csv
+      - name: Verify CSV exists and create ZIP file
+        run: |
+          if [ ! -f "games_export.csv" ]; then
+            echo "Error: games_export.csv not found!"
+            exit 1
+          fi
+          zip games_export.zip games_export.csv
 
       - name: Get current date
         id: date
